@@ -2,18 +2,19 @@ package vrp.service;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.commons.codec.binary.Base64;
 import org.apache.commons.lang3.StringUtils;
+import org.apache.http.client.methods.CloseableHttpResponse;
+import org.apache.http.client.methods.HttpPost;
+import org.apache.http.entity.StringEntity;
+import org.apache.http.impl.client.HttpClients;
 import org.apache.log4j.AppenderSkeleton;
 import org.apache.log4j.spi.LoggingEvent;
-import org.apache.tomcat.util.codec.binary.Base64;
-import org.springframework.http.HttpEntity;
-import org.springframework.http.HttpHeaders;
-import org.springframework.http.HttpMethod;
-import org.springframework.http.MediaType;
-import org.springframework.web.client.HttpClientErrorException;
-import org.springframework.web.client.RestTemplate;
 import vrp.dto.ModuleEventLogDTO;
 import vrp.exceptions.CreateInvalidObjectException;
+import vrp.exceptions.UnexpectedResponseStatusCode;
+import java.io.IOException;
+import java.io.UnsupportedEncodingException;
 
 public class CustomRestAppender extends AppenderSkeleton {
 
@@ -66,20 +67,12 @@ public class CustomRestAppender extends AppenderSkeleton {
         validateModuleName();
 
         try {
-           final var restTemplate = new RestTemplate();
-           final var json = new ObjectMapper().writeValueAsString(new ModuleEventLogDTO( projectName
-                                                                                       , moduleName
-                                                                                       , layout.format(loggingEvent)));
-           final var requestBody = new HttpEntity<>(json, getHttpHeaders());
-           restTemplate.exchange( restURL
-                                , HttpMethod.POST
-                                , requestBody
-                                , String.class);
-
-        } catch (JsonProcessingException e) {
-            throw new RuntimeException("Exception in JSON processing", e);
-        } catch (HttpClientErrorException e) {
-            throw new RuntimeException("Can't send log, check request data(project name, module name and log format)", e);
+            final var client = HttpClients.createDefault();
+            final var response = client.execute(getHttpPostRequest(loggingEvent));
+            checkResponseStatus(response);
+            client.close();
+        } catch (IOException e) {
+            throw new RuntimeException(e);
         }
     }
 
@@ -90,15 +83,42 @@ public class CustomRestAppender extends AppenderSkeleton {
         return false;
     }
 
-    protected HttpHeaders getHttpHeaders() {
+    protected HttpPost getHttpPostRequest(final LoggingEvent loggingEvent) {
         validateCredBasicAuth();
 
-        final var headers = new HttpHeaders();
+        final var httpPost = new HttpPost(restURL);
+        httpPost.setEntity(getJsonEntity(loggingEvent));
+        httpPost.setHeader("Accept", "application/json");
+        httpPost.setHeader("Content-type", "application/json");
         final var base64Credentials = new String(Base64.encodeBase64(credBasicAuth.getBytes()));
-        headers.add("Authorization", "Basic " + base64Credentials);
-        headers.add("Accept", MediaType.APPLICATION_JSON_UTF8_VALUE);
-        headers.setContentType(MediaType.APPLICATION_JSON);
-        return headers;
+        httpPost.setHeader("Authorization", "Basic " + base64Credentials);
+        return httpPost;
+    }
+
+    protected StringEntity getJsonEntity(final LoggingEvent loggingEvent) {
+        try {
+            return new StringEntity(new ObjectMapper().writeValueAsString(new ModuleEventLogDTO( projectName
+                                                                                               , moduleName
+                                                                                               , layout.format(loggingEvent))));
+        } catch (UnsupportedEncodingException | JsonProcessingException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    protected void checkResponseStatus(final CloseableHttpResponse response) {
+        final var responseStatusCode = response.getStatusLine().getStatusCode();
+        if (responseStatusCode == 404) {
+            throw new UnexpectedResponseStatusCode("Status 404. Page not found. Check parameter of log appender: RestURL");
+        }
+        if (responseStatusCode == 401) {
+            throw new UnexpectedResponseStatusCode("Status 401. Unauthorized. Check parameter of log appender: CredBasicAuth ");
+        }
+        if (responseStatusCode == 412) {
+            throw new UnexpectedResponseStatusCode("Status 412. Precondition Failed. Check parameters of log appender: ProjectName, ModuleName and log layout");
+        }
+        if (responseStatusCode != 200) {
+            throw new UnexpectedResponseStatusCode("UnexpectedResponseStatusCode. Check parameters of log appender");
+        }
     }
 
 
@@ -106,25 +126,26 @@ public class CustomRestAppender extends AppenderSkeleton {
     // Validate invariants fields
     //
 
-    protected void validateRestURL(){
-        if(StringUtils.isEmpty(restURL)){
+    protected void validateRestURL() {
+        if (StringUtils.isEmpty(restURL)) {
             throw new CreateInvalidObjectException("URL can't be null. Check appender properties");
         }
     }
 
-    protected void validateCredBasicAuth(){
-        if(StringUtils.isEmpty(credBasicAuth)){
+    protected void validateCredBasicAuth() {
+        if (StringUtils.isEmpty(credBasicAuth)) {
             throw new CreateInvalidObjectException("Credentials for basic authentication can't be null. Check appender properties");
         }
     }
 
-    protected void validateProjectName(){
-        if(StringUtils.isEmpty(projectName)){
+    protected void validateProjectName() {
+        if (StringUtils.isEmpty(projectName)) {
             throw new CreateInvalidObjectException("Project name can't be null. Check appender properties");
         }
     }
-    protected void validateModuleName(){
-        if(StringUtils.isEmpty(moduleName)){
+
+    protected void validateModuleName() {
+        if (StringUtils.isEmpty(moduleName)) {
             throw new CreateInvalidObjectException("Module name can't be null. Check appender properties");
         }
     }
